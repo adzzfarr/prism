@@ -1,8 +1,9 @@
 import { PrismaClient } from "@prisma/client";
 import express from 'express';
+import { Request, Response } from 'express';
 import bodyParser from 'body-parser';
 import crypto from 'crypto';
-import { buildMerkleRoot } from "./merkle.ts";
+import process from "process";
 
 const prisma = new PrismaClient();
 const app = express();
@@ -12,7 +13,7 @@ app.use(bodyParser.json());
 const HMAC_SECRET = process.env.HMAC_SECRET || 'demo-secret';
 
 // Idempotent Gift handler
-app.post('/webhooks/gift', async (req, res) => {
+app.post('/webhooks/gift', async (req: Request, res: Response) => {
     const signature = req.headers['x-hmac-signature'] as string | undefined;
     const raw = JSON.stringify(req.body);
     const expected = crypto.createHmac('sha256', HMAC_SECRET).update(raw).digest('hex');
@@ -52,7 +53,7 @@ app.post('/webhooks/gift', async (req, res) => {
 });
 
 // End live and settle
-app.post('/lives/:id/end', async (req, res) => {
+app.post('/lives/:id/end', async (req: Request, res: Response) => {
     const liveId = req.params.id;
     await prisma.live.update({where: {id: liveId}, data: {endAt: new Date(), status: 'ended'}});
 
@@ -69,14 +70,14 @@ app.post('/lives/:id/end', async (req, res) => {
     res.send({status: 'settled', settlement});
 });
 
-app.get('/creators/:id/balance', async (req, res) => {
+app.get('/creators/:id/balance', async (req: Request, res: Response) => {
     const creatorId = req.params.id;
     const account = await prisma.account.findFirst({where: {ownerId: creatorId, type: 'creator'}});
     res.send({balance: account?.balance ?? 0});
 });
 
 // Provide Merkle proof for a given ledger entry
-app.get('/merkle/proof/:ledgerId', async (req, res) => {
+app.get('/merkle/proof/:ledgerId', async (req: Request, res: Response) => {
      const {ledgerId} = req.params;
 
     const ledgerEntry = await prisma.ledger.findUnique({
@@ -98,8 +99,8 @@ app.get('/merkle/proof/:ledgerId', async (req, res) => {
 
     const itemsToHash = settledLedger.map(entry => JSON.stringify({
         id: entry.id,
-        debitAccountId: entry.debitAccId,
-        creditAccountId: entry.creditAccId,
+        debitAccountId: entry.debitAccountId,
+        creditAccountId: entry.creditAccountId,
         amount: entry.amount,
         refType: entry.refType,
         refId: entry.refId,
@@ -187,7 +188,7 @@ async function createLedgerEntry({
     // Use transaction API to avoid race condition (between ledger record creation and account updating); maintain data integrity 
     await prisma.$transaction(async (transaction) => {
         // Compute previous hash based on most recent ledger entry
-        const prev = await transaction.ledger.findFirst({orderBy: {timestamp: 'desc'}}); 
+        const prev = await transaction.ledger.findFirst({orderBy: {createdAt: 'desc'}}); 
         const prevHash = prev?.hashThis ?? '';
 
         // Update previous hash
@@ -224,7 +225,7 @@ async function createLedgerEntry({
 
     /*
     // Compute previous hash based on most recent ledger entry
-    const prev = await prisma.ledger.findFirst({orderBy: {timestamp: 'desc'}}); 
+    const prev = await prisma.ledger.findFirst({orderBy: {createdAt: 'desc'}}); 
     const prevHash = prev?.hashThis ?? '';
 
     // Update previous hash
@@ -360,4 +361,26 @@ async function createMerkleSnapshot() {
             ledgerIds: settledLedger.map(entry => entry.id), // for proof generation later on
         }
     });
+}
+
+function buildMerkleRoot(items: string[]) {
+    if (items.length === 0) return '';
+
+    let level = items.map(item => crypto.createHash('sha256').update(item).digest('hex'));
+
+    while (level.length > 1) {
+        const next: string[] = [];
+
+        for (let i = 0; i < level.length; i += 2) {
+            if (i + 1 === level.length) {
+                next.push(level[i])
+            } else {
+                next.push(crypto.createHash('sha256').update(level[i] + level[i + 1]).digest('hex'));
+            }
+        } 
+        
+        level = next;
+    }
+
+    return level[0];
 }
