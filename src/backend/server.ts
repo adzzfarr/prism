@@ -2,6 +2,7 @@ import { PrismaClient } from "@prisma/client";
 import express from 'express';
 import bodyParser from 'body-parser';
 import crypto from 'crypto';
+import { buildMerkleRoot } from "./merkle.ts";
 
 const prisma = new PrismaClient();
 const app = express();
@@ -18,14 +19,21 @@ app.post('/webhooks/gift', async (req, res) => {
 
     if (signature !== expected) return res.status(401).send({error: 'Invalid Signature'});
 
-    const {idempotencyKey, liveId, consumerId, coinAmount, timestamp} = req.body;
+    const {
+        idempotencyKey, 
+        liveId, 
+        consumerId, 
+        coinAmount, 
+    } = req.body;
 
     // Check if gift already processed
     const existing = await prisma.gift.findUnique({where: {idempotencyKey}});
     if (existing) return res.status(200).send({status: 'already-recorded'});
 
     // If not, create gift
-    const gift = await prisma.gift.create({data: {idempotencyKey, liveId, consumerId, coinAmount}});
+    const gift = await prisma.gift.create({
+        data: {idempotencyKey, liveId, consumerId, coinAmount}
+    });
 
     const holdingAccount = await getHoldingAccountforCreatorByLive(liveId);
 
@@ -54,6 +62,10 @@ app.post('/lives/:id/end', async (req, res) => {
 
     // Settle the live
     const settlement = await runSettlementForLive(liveId, quality);
+
+    // Create Merkle snapshot
+    await createMerkleSnapshot();
+
     res.send({status: 'settled', settlement});
 });
 
@@ -63,18 +75,98 @@ app.get('/creators/:id/balance', async (req, res) => {
     res.send({balance: account?.balance ?? 0});
 });
 
+// Provide Merkle proof for a given ledger entry
+app.get('/merkle/proof/:ledgerId', async (req, res) => {
+     const {ledgerId} = req.params;
+
+    const ledgerEntry = await prisma.ledger.findUnique({
+        where: {id: ledgerId}
+    });
+    if (!ledgerEntry) return res.status(404).send({error: 'Ledger entry not found'});
+
+    const snapshot = await prisma.merkleSnapshot.findFirst({
+        where: {ledgerIds: {has: ledgerId}},
+        orderBy: {createdAt: 'desc'}, // most recent snapshot
+    });
+    if (!snapshot) return res.status(404).send({error: 'No Merkle snapshot found'});
+
+    // Fetch all original items from snapshot
+    const settledLedger = await prisma.ledger.findMany({
+        where: {id: {in: snapshot.ledgerIds}},
+        orderBy: {createdAt: 'asc'}, // same order as when snapshot was created
+    });
+
+    const itemsToHash = settledLedger.map(entry => JSON.stringify({
+        id: entry.id,
+        debitAccountId: entry.debitAccId,
+        creditAccountId: entry.creditAccId,
+        amount: entry.amount,
+        refType: entry.refType,
+        refId: entry.refId,
+    }));
+
+    // Find initial hash and index of the requested ledger entry
+    let currentIndex = settledLedger.findIndex(entry => entry.id === ledgerId);
+    if (currentIndex === -1) {
+        return res.status(404).send({error: 'Ledger entry not found in the snapshot'});
+    }
+
+    const proofHashes: string[] = [];
+    let currentLevel = itemsToHash.map(item => crypto.createHash('sha256').update(item).digest('hex'));
+
+    while (currentLevel.length > 1) {
+        const nextLevel: string[] = [];
+        const siblingIndex = currentIndex % 2 === 0 ? currentIndex + 1 : currentIndex - 1;
+
+        // Add the sibling to the proof path, if it exists
+        if (siblingIndex < currentLevel.length) {
+            proofHashes.push(currentLevel[siblingIndex]);
+        } else {
+            // Handle the odd number of nodes case where there is no sibling
+            proofHashes.push(currentLevel[currentIndex]);
+        }
+
+        // Build the next level of the tree
+        for (let i = 0; i < currentLevel.length; i += 2) {
+            if (i + 1 === currentLevel.length) {
+                nextLevel.push(currentLevel[i]);
+            } else {
+                nextLevel.push(crypto.createHash('sha256').update(currentLevel[i] + currentLevel[i + 1]).digest('hex'));
+            }
+        }
+        currentLevel = nextLevel;
+        currentIndex = Math.floor(currentIndex / 2);
+    }
+    
+    // Reverse proof hashes to get correct order for verification
+    proofHashes.reverse();
+
+    return res.status(200).send({
+        ledgerEntry,
+        merkleRoot: snapshot.root,
+        rootSignature: snapshot.signature,
+        proof: proofHashes,
+    });
+});
+
 app.listen(4000, () => console.log('Listening on 4000'));
 
 async function getHoldingAccountforCreatorByLive(liveId: string) {
-    const live = await prisma.live.findUnique({where: {id: liveId}});
+    const live = await prisma.live.findUnique({
+        where: {id: liveId}
+    });
     if (!live) throw new Error('Live not found');
 
     const creatorId = live!.creatorId;
-    const account = await prisma.account.findFirst({where: {ownerId: creatorId, type: 'holding'}});
+    const account = await prisma.account.findFirst({
+        where: {ownerId: creatorId, type: 'holding'}
+    });
     if (account) return account;
 
     // If holding account does not exist yet, create one
-    return prisma.account.create({data: {ownerId: creatorId, type: 'holding'}});
+    return prisma.account.create({
+        data: {ownerId: creatorId, type: 'holding'}
+    });
 }
 
 async function createLedgerEntry({
@@ -82,13 +174,14 @@ async function createLedgerEntry({
     creditAccountId, 
     amount, 
     refType, 
-    refId} : {
-        debitAccountId: string, 
-        creditAccountId: string, 
-        amount: number, 
-        refType: string, 
-        refId: string
-    }) {
+    refId
+} : {
+    debitAccountId: string, 
+    creditAccountId: string, 
+    amount: number, 
+    refType: string, 
+    refId: string
+}) {
     // Money flows out from debit account to the credit account
 
     // Use transaction API to avoid race condition (between ledger record creation and account updating); maintain data integrity 
@@ -186,9 +279,18 @@ async function runSettlementForLive(liveId: string, quality: number) {
     // Ledger: Move from holding account to creator, platform, and reserve accounts
     const holding = await getHoldingAccountforCreatorByLive(liveId);
     const live = await prisma.live.findUnique({where: {id: liveId}});
-    const creatorAccount = await prisma.account.findFirst({where: {ownerId: live!.creatorId, type: 'creator'}});
-    const platformAccount = await prisma.account.findFirst({where: {type: 'platform'}});
-    const reserveAccount = await prisma.account.findFirst({where: {type: 'reserve'}});
+
+    const creatorAccount = await prisma.account.findFirst({
+        where: {ownerId: live!.creatorId, type: 'creator'}
+    });
+
+    const platformAccount = await prisma.account.findFirst({
+        where: {type: 'platform'}
+    });
+
+    const reserveAccount = await prisma.account.findFirst({
+        where: {type: 'reserve'}
+    });
 
     await createLedgerEntry({
         debitAccountId: holding.id, 
@@ -220,4 +322,42 @@ async function runSettlementForLive(liveId: string, quality: number) {
         platformAmount, 
         reserveAmount,
     };
+}
+
+async function createMerkleSnapshot() {
+    // Fetch all settled ledger entries, with earliest entry first for consistent Merkle tree
+    const settledLedger = await prisma.ledger.findMany({
+        where: {status: 'settled'},
+        orderBy: {createdAt: 'asc'},
+    });
+
+    if (settledLedger.length === 0) {
+        // No settled ledger entries to snapshot
+        return;
+    }
+
+    // Prepare data for hashing => every node in the Merkle tree should be a unique string representation of a ledger entry
+    const itemsToHash = settledLedger.map(entry => JSON.stringify({
+        id: entry.id,
+        debitAccountId: entry.debitAccountId,
+        creditAccountId: entry.creditAccountId,
+        amount: entry.amount,
+        refType: entry.refType,
+        refId: entry.refId,
+    }));
+
+    // Construct the Merkle root
+    const merkleRoot = buildMerkleRoot(itemsToHash);
+
+    // Sign the Merkle root
+    const signature = crypto.createHmac('sha256', HMAC_SECRET).update(merkleRoot).digest('hex');
+
+    // Store the snapshot
+    await prisma.merkleSnapshot.create({
+        data: {
+            root: merkleRoot,
+            signature: signature,
+            ledgerIds: settledLedger.map(entry => entry.id), // for proof generation later on
+        }
+    });
 }

@@ -64,10 +64,11 @@ model Ledger {
   creditAccId String
   amount      Int
   currency    String   @default("COIN")
-  refType     String // e.g. 'gift' | 'settlement' | 'payout'
+  refType     String // 'gift' | 'settlement' | 'payout'
   refId       String
   hashPrev    String?
   hashThis    String
+  status      String   @default("unsettled")
 }
 
 model Payout {
@@ -81,8 +82,8 @@ model Payout {
 
 model MerkleSnapshot {
   id        String   @id @default(cuid())
-  period    String
-  rootHash  String
-  signature String
+  root    String
+  signature  String
+  ledgerIds String[]
   createdAt DateTime @default(now())
 }
