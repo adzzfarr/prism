@@ -8,7 +8,6 @@ const app = express();
 app.use(bodyParser.json());
 
 // Config
-const PLATFORM_ACCOUNT_ID = 'platform-account';
 const HMAC_SECRET = process.env.HMAC_SECRET || 'demo-secret';
 
 // Idempotent Gift handler
@@ -78,10 +77,60 @@ async function getHoldingAccountforCreatorByLive(liveId: string) {
     return prisma.account.create({data: {ownerId: creatorId, type: 'holding'}});
 }
 
-async function createLedgerEntry({debitAccountId, creditAccountId, amount, refType, refId}:{debitAccountId:string, creditAccountId: string, amount: number, refType: string, refId: string}) {
+async function createLedgerEntry({
+    debitAccountId, 
+    creditAccountId, 
+    amount, 
+    refType, 
+    refId} : {
+        debitAccountId: string, 
+        creditAccountId: string, 
+        amount: number, 
+        refType: string, 
+        refId: string
+    }) {
     // Money flows out from debit account to the credit account
 
-    // Compute previous hash
+    // Use transaction API to avoid race condition (between ledger record creation and account updating); maintain data integrity 
+    await prisma.$transaction(async (transaction) => {
+        // Compute previous hash based on most recent ledger entry
+        const prev = await transaction.ledger.findFirst({orderBy: {timestamp: 'desc'}}); 
+        const prevHash = prev?.hashThis ?? '';
+
+        // Update previous hash
+        const payload = `${debitAccountId}|${creditAccountId}|${amount}|${refType}|${refId}|${Date.now()}`;
+        const hash = crypto.createHash('sha256').update(prevHash + payload).digest('hex');
+
+        await transaction.ledger.create({
+            data: {
+                debitAccountId, 
+                creditAccountId, 
+                amount, 
+                refType, 
+                refId, 
+                hashPrev: 
+                prevHash, 
+                hashThis: hash
+            }
+        });
+
+        // Update account balances
+        const debit = await transaction.account.findUnique({where: {id: debitAccountId}});
+        const credit = await transaction.account.findUnique({where: {id: creditAccountId}});
+
+        if (debit) await transaction.account.update({
+            where: {id: debit.id}, 
+            data: {balance: debit.balance - amount}
+        });
+
+        if (credit) await transaction.account.update({
+            where: {id: credit.id}, 
+            data: {balance: credit.balance + amount}
+        });
+    });
+
+    /*
+    // Compute previous hash based on most recent ledger entry
     const prev = await prisma.ledger.findFirst({orderBy: {timestamp: 'desc'}}); 
     const prevHash = prev?.hashThis ?? '';
 
@@ -92,12 +141,13 @@ async function createLedgerEntry({debitAccountId, creditAccountId, amount, refTy
     await prisma.ledger.create({data: {debitAccountId, creditAccountId, amount, refType, refId, hashPrev: prevHash, hashThis: hash}});
 
     // Update account balances
-    // ASK GPT ABOUT: in production use DB transaction + optimistic locking
+    // Can use database transactions in production instead of reading, modifying, and writing
     const debit = await prisma.account.findUnique({where: {id: debitAccountId}});
     const credit = await prisma.account.findUnique({where: {id: creditAccountId}});
 
     if (debit) await prisma.account.update({where: {id: debit.id}, data: {balance: debit.balance - amount}});
     if (credit) await prisma.account.update({where: {id: credit.id}, data: {balance: credit.balance + amount}});
+    */
 }
 
 async function computeQualityScore(liveId: string) {
