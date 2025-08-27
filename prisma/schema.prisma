@@ -44,7 +44,7 @@ model Gift {
   consumerId     String
   consumer       User     @relation(name: "giftConsumer", fields: [consumerId], references: [id])
   amountCoins    Int
-  ts             DateTime @default(now())
+  timestamp             DateTime @default(now())
   riskFlag       Boolean  @default(false)
   idempotencyKey String   @unique
 }
@@ -53,13 +53,13 @@ model Account {
   id      String @id @default(cuid())
   ownerId String
   owner   User   @relation(fields: [ownerId], references: [id])
-  type    String // 'escrow' | 'creator' | 'platform' | 'reserve'
+  type    String // 'holding' | 'creator' | 'platform' | 'reserve'
   balance Int    @default(0)
 }
 
 model Ledger {
   id          String   @id @default(cuid())
-  ts          DateTime @default(now())
+  timestamp          DateTime @default(now())
   debitAccId  String
   creditAccId String
   amount      Int
@@ -76,7 +76,7 @@ model Payout {
   amount      Int
   status      String   @default("pending")
   externalRef String?
-  ts          DateTime @default(now())
+  timestamp          DateTime @default(now())
 }
 
 model MerkleSnapshot {
