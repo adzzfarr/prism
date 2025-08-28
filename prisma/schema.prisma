@@ -51,8 +51,8 @@ model Gift {
 
 model Account {
   id      String @id @default(cuid())
-  ownerId String
-  owner   User   @relation(fields: [ownerId], references: [id])
+  ownerId String?
+  owner   User?   @relation(fields: [ownerId], references: [id])
   type    String // 'holding' | 'creator' | 'platform' | 'reserve'
   balance Int    @default(0)
 }

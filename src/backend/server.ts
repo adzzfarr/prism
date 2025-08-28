@@ -12,6 +12,48 @@ app.use(bodyParser.json());
 // Config
 const HMAC_SECRET = process.env.HMAC_SECRET || 'demo-secret';
 
+// Create user
+app.post('/users', async (req: Request, res: Response) => {
+    const { tiktokId, name, role, kycStatus } = req.body;
+    try {
+        const user = await prisma.user.create({
+            data: {tiktokId, name, role, kycStatus}
+        });
+        res.status(201).send(user);
+    } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to create user." });
+    }
+});
+
+// Create live session
+app.post('/lives', async (req: Request, res: Response) => {
+    const { creatorId, startAt } = req.body;
+    try {
+        const live = await prisma.live.create({
+            data: {creatorId, startAt: new Date(startAt)}
+        });
+        res.status(201).send(live);
+    } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to create live session." });
+    }
+});
+
+// Create account
+app.post('/accounts', async (req: Request, res: Response) => {
+    const { ownerId, type, balance } = req.body;
+    try {
+        const data: any = { type, balance: balance ?? 0 };
+        if (ownerId) data.ownerId = ownerId; // Only set ownerId if present
+        const account = await prisma.account.create({ data });
+        res.status(201).send(account);
+    } catch (error) {
+        console.error('Account creation error:', error, req.body);
+        res.status(500).send({ error: "Failed to create account." });
+    }
+});
+
 // Idempotent Gift handler
 app.post('/webhooks/gift', async (req: Request, res: Response) => {
     const signature = req.headers['x-hmac-signature'] as string | undefined;
@@ -204,7 +246,8 @@ async function createLedgerEntry({
                 refId, 
                 hashPrev: 
                 prevHash, 
-                hashThis: hash
+                hashThis: hash,
+                status: 'settled', // For simplicity, mark as settled immediately; in real world, may have pending state
             }
         });
 
