@@ -4,3 +4,7 @@ onlyBuiltDependencies:
   - msgpackr-extract
   - prisma
   - unrs-resolver
+
+packages:
+  - '/src/backend'  
+  - '/src/frontend' 
