@@ -75,9 +75,42 @@ app.post('/webhooks/gift', async (req: Request, res: Response) => {
     const existing = await prisma.gift.findUnique({where: {idempotencyKey}});
     if (existing) return res.status(200).send({status: 'already-recorded'});
 
-    // If not, create gift
+    // Otherwise, create gift
+    // Fetch consumer data to perform fraud risk assessment
+    const consumer = await prisma.user.findUnique({where: {id: consumerId}});
+    if (!consumer) return res.status(404).send({error: 'Consumer not found'});
+
+    // Count recent gifts (e.g. in the last hour; can be adjusted)
+    const recentGiftsCount = await prisma.gift.count({
+        where: {
+            consumerId,
+            timestamp: {
+                gte: new Date(Date.now() - 60 * 60 * 1000), 
+            },
+        },
+    });
+
+    // Assess risk of fraud
+    const riskFlag = assessGiftRisk({
+        coinAmount,
+        consumer: {
+            createdAt: consumer.createdAt, 
+            kycStatus: consumer.kycStatus
+        },
+        recentGiftCount: recentGiftsCount,
+        timestamp: new Date(),
+    });
+
+    // Record the gift
     const gift = await prisma.gift.create({
-        data: {idempotencyKey, liveId, consumerId, coinAmount}
+        data: {
+            idempotencyKey,
+            liveId,
+            consumerId,
+            coinAmount,
+            timestamp: new Date(),
+            riskFlag,
+        }
     });
 
     const holdingAccount = await getHoldingAccountforCreatorByLive(liveId);
@@ -444,6 +477,23 @@ async function createMerkleSnapshot() {
             ledgerIds: settledLedger.map(entry => entry.id), // for proof generation later on
         }
     });
+}
+
+/* Helper Functions */
+
+function assessGiftRisk({
+    coinAmount,
+    consumer,
+    recentGiftCount,
+    timestamp,
+} : {
+    coinAmount: number;
+    consumer: { createdAt: Date; kycStatus: string };
+    recentGiftCount: number;
+    timestamp: Date;
+}) : boolean {
+    if ((coinAmount > 1000) || (recentGiftCount > 10) || (consumer.kycStatus !== "verified")) return true;
+    return false;
 }
 
 function buildMerkleRoot(items: string[]) {
