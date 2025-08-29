@@ -12,6 +12,8 @@ app.use(bodyParser.json());
 // Config
 const HMAC_SECRET = process.env.HMAC_SECRET || 'demo-secret';
 
+/* POST REQUESTS */
+
 // Create user
 app.post('/users', async (req: Request, res: Response) => {
     const { tiktokId, name, role, kycStatus } = req.body;
@@ -112,6 +114,23 @@ app.post('/lives/:id/end', async (req: Request, res: Response) => {
     res.send({status: 'settled', settlement});
 });
 
+/* GET REQUESTS */
+
+// Get all live sessions
+app.get('/lives', async (req: Request, res: Response) => {
+    try {
+        const lives = await prisma.live.findMany({
+            include: { creator: true },
+            orderBy: { startAt: 'desc' },
+        });
+        res.send(lives);
+    } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to fetch live sessions." });
+    }
+});
+
+// Get creator balance
 app.get('/creators/:id/balance', async (req: Request, res: Response) => {
     const creatorId = req.params.id;
     const account = await prisma.account.findFirst({where: {ownerId: creatorId, type: 'creator'}});
