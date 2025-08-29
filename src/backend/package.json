@@ -5,8 +5,9 @@
   "main": "index.js",
   "scripts": {
     "test": "pnpm test",
+    "migrate": "npx prisma migrate dev --name init --schema src",
     "server": "pnpm ts-node-dev --respawn src/server.ts",
-    "db": "npx prisma studio --schema src/prisma"
+    "view-db": "npx prisma studio --schema src/prisma"
   },
   "keywords": [],
   "author": "",

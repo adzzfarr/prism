@@ -130,6 +130,27 @@ app.get('/lives', async (req: Request, res: Response) => {
     }
 });
 
+// Get specific live session
+app.get('/lives/:id', async (req, res) => {
+  try {
+    const live = await prisma.live.findUnique({
+      where: { id: req.params.id },
+      include: {
+        creator: true,
+        gifts: {
+          include: {
+            consumer: true
+          }
+        }
+      },
+    });
+    if (!live) return res.status(404).send({ error: "Session not found" });
+    res.send(live);
+  } catch (error) {
+    res.status(500).send({ error: "Failed to fetch session." });
+  }
+});
+
 // Get creator balance
 app.get('/creators/:id/balance', async (req: Request, res: Response) => {
     const creatorId = req.params.id;

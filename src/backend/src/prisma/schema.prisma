@@ -34,7 +34,7 @@ model Live {
   metricsJson  Json?
   qualityScore Float?
   status       String    @default("running")
-  Gift         Gift[]
+  gifts        Gift[]
 }
 
 model Gift {
