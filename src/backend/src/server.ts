@@ -134,16 +134,16 @@ app.post('/lives/:id/end', async (req: Request, res: Response) => {
     await prisma.live.update({where: {id: liveId}, data: {endAt: new Date(), status: 'ended'}});
 
     // Compute quality of live
-    const quality = await computeQualityScore(liveId);
-    await prisma.live.update({where: {id: liveId}, data: {qualityScore: quality}});
+    const qualityMetrics = await computeQualityScore(liveId);
+    await prisma.live.update({where: {id: liveId}, data: {qualityScore: qualityMetrics.score}});
 
     // Settle the live
-    const settlement = await runSettlementForLive(liveId, quality);
+    const settlement = await runSettlementForLive(liveId, qualityMetrics.score);
 
     // Create Merkle snapshot
     await createMerkleSnapshot();
 
-    res.send({status: 'settled', settlement});
+    res.send({status: 'settled', settlement, qualityMetrics});
 });
 
 /* GET REQUESTS */
@@ -181,9 +181,13 @@ app.get('/lives/:id', async (req, res) => {
     // Compute fraud statistics
     const fraudStats = computeFraudStatistics(live.gifts);
 
+    // Compute quality metrics
+    const qualityMetrics = await computeQualityScore(live.id);
+
     res.send({
         ...live,
         fraudStats,
+        qualityMetrics,
     });
   } catch (error) {
     res.status(500).send({ error: "Failed to fetch session." });
@@ -351,13 +355,16 @@ async function computeQualityScore(liveId: string) {
     const gifts = await prisma.gift.findMany({where: {liveId}});
     const giftCount = gifts.length;
 
-    // Fake metrics for retention and engagement; weights can be adjusted in the real world
+    // Fake values for retention and engagement; could be calculated using
+    // average watch time / live duration, number of comments per minute, etc.
+    // Weights can be adjusted after real world testing
     const retention = Math.min(1, 0.3 + giftCount * 0.05);
     const engagement = Math.min(1, 0.15 + giftCount * 0.025);
 
-    // Calculate score; weights can be adjusted in the real world
+    // Calculate quality score
+    // Weights can be adjusted after real world testing
     const score = Math.round((retention * 0.5 + engagement * 0.5) * 100);
-    return score;
+    return { score, retention, engagement };
 }
 
 async function runSettlementForLive(liveId: string, quality: number) {
