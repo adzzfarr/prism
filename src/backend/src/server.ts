@@ -98,7 +98,6 @@ app.post('/webhooks/gift', async (req: Request, res: Response) => {
             kycStatus: consumer.kycStatus
         },
         recentGiftCount: recentGiftsCount,
-        timestamp: new Date(),
     });
 
     // Record the gift
@@ -178,7 +177,14 @@ app.get('/lives/:id', async (req, res) => {
       },
     });
     if (!live) return res.status(404).send({ error: "Session not found" });
-    res.send(live);
+
+    // Compute fraud statistics
+    const fraudStats = computeFraudStatistics(live.gifts);
+
+    res.send({
+        ...live,
+        fraudStats,
+    });
   } catch (error) {
     res.status(500).send({ error: "Failed to fetch session." });
   }
@@ -338,26 +344,6 @@ async function createLedgerEntry({
             data: {balance: credit.balance + amount}
         });
     });
-
-    /*
-    // Compute previous hash based on most recent ledger entry
-    const prev = await prisma.ledger.findFirst({orderBy: {createdAt: 'desc'}}); 
-    const prevHash = prev?.hashThis ?? '';
-
-    // Update previous hash
-    const payload = `${debitAccountId}|${creditAccountId}|${amount}|${refType}|${refId}|${Date.now()}`;
-    const hash = crypto.createHash('sha256').update(prevHash + payload).digest('hex');
-
-    await prisma.ledger.create({data: {debitAccountId, creditAccountId, amount, refType, refId, hashPrev: prevHash, hashThis: hash}});
-
-    // Update account balances
-    // Can use database transactions in production instead of reading, modifying, and writing
-    const debit = await prisma.account.findUnique({where: {id: debitAccountId}});
-    const credit = await prisma.account.findUnique({where: {id: creditAccountId}});
-
-    if (debit) await prisma.account.update({where: {id: debit.id}, data: {balance: debit.balance - amount}});
-    if (credit) await prisma.account.update({where: {id: credit.id}, data: {balance: credit.balance + amount}});
-    */
 }
 
 async function computeQualityScore(liveId: string) {
@@ -485,16 +471,29 @@ function assessGiftRisk({
     coinAmount,
     consumer,
     recentGiftCount,
-    timestamp,
 } : {
     coinAmount: number;
     consumer: { createdAt: Date; kycStatus: string };
     recentGiftCount: number;
-    timestamp: Date;
 }) : boolean {
     if ((coinAmount > 1000) || (recentGiftCount > 10) || (consumer.kycStatus !== "verified")) return true;
     return false;
 }
+
+function computeFraudStatistics(gifts: any[]) {
+  const total = gifts.length;
+  const frauds = gifts.filter(g => g.riskFlag);
+  const fraudCount = frauds.length;
+  const fraudUsers = new Set(frauds.map(g => g.consumer?.name)).size;
+
+  return {
+    totalGifts: total,
+    fraudCount,
+    fraudUsers,
+    fraudPercent: total > 0 ? Math.round((fraudCount / total) * 100) : 0
+  };
+}
+
 
 function buildMerkleRoot(items: string[]) {
     if (items.length === 0) return '';
