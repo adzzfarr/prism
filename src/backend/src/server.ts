@@ -133,11 +133,20 @@ app.post('/webhooks/gift', async (req: Request, res: Response) => {
 // End live and settle
 app.post('/lives/:id/end', async (req: Request, res: Response) => {
     const liveId = req.params.id;
-    await prisma.live.update({where: {id: liveId}, data: {endAt: new Date(), status: 'ended'}});
+    await prisma.live.update({
+        where: { id: liveId }, 
+        data: {
+            endAt: new Date(), 
+            status: 'ended'
+        }
+    });
 
     // Compute quality of live
     const qualityMetrics = await computeQualityScore(liveId);
-    await prisma.live.update({where: {id: liveId}, data: {qualityScore: qualityMetrics.score}});
+    await prisma.live.update({
+        where: { id: liveId },
+        data: { qualityScore: qualityMetrics.score }
+    });
 
     // Settle the live
     const settlement = await runSettlementForLive(liveId, qualityMetrics.score);
