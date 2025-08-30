@@ -4,10 +4,12 @@ import { Request, Response } from 'express';
 import bodyParser from 'body-parser';
 import crypto from 'crypto';
 import process from "process";
+import cors from 'cors';
 
 const prisma = new PrismaClient();
 const app = express();
 app.use(bodyParser.json());
+app.use(cors());
 
 // Config
 const HMAC_SECRET = process.env.HMAC_SECRET || 'demo-secret';
@@ -146,6 +148,75 @@ app.post('/lives/:id/end', async (req: Request, res: Response) => {
     res.send({status: 'settled', settlement, qualityMetrics});
 });
 
+/* --------------- POST REQUESTS --------------- */
+
+
+
+/* DEMO ENDPOINTS */
+
+// Send a single gift
+app.post('/demo/send-gift/:liveId', async (req, res) => {
+  const liveId = req.params.liveId;
+  // Pick a random consumer
+  const consumers = await prisma.user.findMany({ where: { role: 'consumer' } });
+  const consumer = consumers[Math.floor(Math.random() * consumers.length)];
+  await prisma.gift.create({
+    data: {
+      liveId,
+      consumerId: consumer.id,
+      idempotencyKey: crypto.randomUUID(),
+      coinAmount: Math.floor(Math.random() * 500) + 50,
+      timestamp: new Date(),
+      riskFlag: false,
+    }
+  });
+  res.send({ ok: true });
+});
+
+// Send multiple gifts
+app.post('/demo/send-multiple-gifts/:liveId', async (req, res) => {
+  const liveId = req.params.liveId;
+  const consumers = await prisma.user.findMany({ where: { role: 'consumer' } });
+  for (let i = 0; i < 5; i++) {
+    const consumer = consumers[Math.floor(Math.random() * consumers.length)];
+    await prisma.gift.create({
+      data: {
+        idempotencyKey: crypto.randomUUID(),
+        liveId,
+        consumerId: consumer.id,
+        coinAmount: Math.floor(Math.random() * 500) + 50,
+        timestamp: new Date(),
+        riskFlag: false,
+      }
+    });
+  }
+  res.send({ ok: true });
+});
+
+// Trigger a fraud burst
+app.post('/demo/fraud-burst/:liveId', async (req, res) => {
+  const liveId = req.params.liveId;
+  const consumers = await prisma.user.findMany({ where: { role: 'consumer' } });
+  for (let i = 0; i < 12; i++) {
+    const consumer = consumers[Math.floor(Math.random() * consumers.length)];
+    await prisma.gift.create({
+      data: {
+        liveId,
+        consumerId: consumer.id,
+        idempotencyKey: crypto.randomUUID(),
+        coinAmount: Math.floor(Math.random() * 2000) + 1000, // Large amount
+        timestamp: new Date(),
+        riskFlag: true,
+      }
+    });
+  }
+  res.send({ ok: true });
+});
+
+/* --------------- DEMO ENDPOINTS --------------- */
+
+
+
 /* GET REQUESTS */
 
 // Get all live sessions
@@ -163,35 +234,36 @@ app.get('/lives', async (req: Request, res: Response) => {
 });
 
 // Get specific live session
-app.get('/lives/:id', async (req, res) => {
-  try {
-    const live = await prisma.live.findUnique({
-      where: { id: req.params.id },
-      include: {
-        creator: true,
-        gifts: {
-          include: {
-            consumer: true
-          }
+app.get('/lives/:id', async (req: Request, res: Response) => {
+    try {
+        const live = await prisma.live.findUnique({
+        where: { id: req.params.id },
+        include: {
+            creator: true,
+            gifts: {
+            include: { consumer: true }
+            }
         }
-      },
-    });
-    if (!live) return res.status(404).send({ error: "Session not found" });
+        });
+        if (!live) return res.status(404).send({ error: "Session not found" });
 
-    // Compute fraud statistics
-    const fraudStats = computeFraudStatistics(live.gifts);
+        // Compute fraud statistics
+        const fraudStats = computeFraudStatistics(live.gifts);
 
-    // Compute quality metrics
-    const qualityMetrics = await computeQualityScore(live.id);
+        // Compute quality metrics
+        const qualityMetrics = await computeQualityScore(live.id);
 
-    res.send({
-        ...live,
+        res.json({
+        creatorName: live.creator?.name,
+        status: live.status,
+        startAt: live.startAt,
+        gifts: live.gifts,
         fraudStats,
         qualityMetrics,
-    });
-  } catch (error) {
-    res.status(500).send({ error: "Failed to fetch session." });
-  }
+        });
+    } catch (error) {
+        res.status(500).send({ error: "Failed to fetch session." });
+    }
 });
 
 // Get creator balance
@@ -275,7 +347,41 @@ app.get('/merkle/proof/:ledgerId', async (req: Request, res: Response) => {
     });
 });
 
+/* --------------- GET REQUESTS --------------- */
+
+// LISTEN
 app.listen(4000, () => console.log('Listening on 4000'));
+
+
+
+/* Helper Functions */
+
+function assessGiftRisk({
+    coinAmount,
+    consumer,
+    recentGiftCount,
+} : {
+    coinAmount: number;
+    consumer: { createdAt: Date; kycStatus: string };
+    recentGiftCount: number;
+}) : boolean {
+    if ((coinAmount > 1000) || (recentGiftCount > 10) || (consumer.kycStatus !== "verified")) return true;
+    return false;
+}
+
+function computeFraudStatistics(gifts: any[]) {
+  const total = gifts.length;
+  const frauds = gifts.filter(g => g.riskFlag);
+  const fraudCount = frauds.length;
+  const fraudUsers = new Set(frauds.map(g => g.consumer?.name)).size;
+
+  return {
+    totalGifts: total,
+    fraudCount,
+    fraudUsers,
+    fraudPercent: total > 0 ? Math.round((fraudCount / total) * 100) : 0
+  };
+}
 
 async function getHoldingAccountforCreatorByLive(liveId: string) {
     const live = await prisma.live.findUnique({
@@ -351,9 +457,10 @@ async function createLedgerEntry({
 }
 
 async function computeQualityScore(liveId: string) {
-    // Use gift counts to calculate user retention and user engagement
+    // Use legitimate gift counts to calculate user retention and user engagement
     const gifts = await prisma.gift.findMany({where: {liveId}});
-    const giftCount = gifts.length;
+    const legitimateGifts = gifts.filter(g => !g.riskFlag);
+    const giftCount = legitimateGifts.length;
 
     // Fake values for retention and engagement; could be calculated using
     // average watch time / live duration, number of comments per minute, etc.
@@ -470,35 +577,6 @@ async function createMerkleSnapshot() {
             ledgerIds: settledLedger.map(entry => entry.id), // for proof generation later on
         }
     });
-}
-
-/* Helper Functions */
-
-function assessGiftRisk({
-    coinAmount,
-    consumer,
-    recentGiftCount,
-} : {
-    coinAmount: number;
-    consumer: { createdAt: Date; kycStatus: string };
-    recentGiftCount: number;
-}) : boolean {
-    if ((coinAmount > 1000) || (recentGiftCount > 10) || (consumer.kycStatus !== "verified")) return true;
-    return false;
-}
-
-function computeFraudStatistics(gifts: any[]) {
-  const total = gifts.length;
-  const frauds = gifts.filter(g => g.riskFlag);
-  const fraudCount = frauds.length;
-  const fraudUsers = new Set(frauds.map(g => g.consumer?.name)).size;
-
-  return {
-    totalGifts: total,
-    fraudCount,
-    fraudUsers,
-    fraudPercent: total > 0 ? Math.round((fraudCount / total) * 100) : 0
-  };
 }
 
 
