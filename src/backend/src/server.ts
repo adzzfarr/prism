@@ -14,6 +14,10 @@ app.use(cors());
 // Config
 const HMAC_SECRET = process.env.HMAC_SECRET || 'demo-secret';
 
+
+// Example conversion rate
+const COIN_TO_USD = 0.013;
+
 /* POST REQUESTS */
 
 // Create user
@@ -46,9 +50,9 @@ app.post('/lives', async (req: Request, res: Response) => {
 
 // Create account
 app.post('/accounts', async (req: Request, res: Response) => {
-    const { ownerId, type, balance } = req.body;
+    const { ownerId, type, balanceUSD } = req.body;
     try {
-        const data: any = { type, balance: balance ?? 0 };
+        const data: any = { type, balanceUSD: balanceUSD ?? 0 };
         if (ownerId) data.ownerId = ownerId; // Only set ownerId if present
         const account = await prisma.account.create({ data });
         res.status(201).send(account);
@@ -119,11 +123,14 @@ app.post('/webhooks/gift', async (req: Request, res: Response) => {
     // Ledger double-entry 
     // Debit: From consumer account 
     // Credit: To holding account 
+    const consumerAccount = await prisma.account.findFirst({ where: { ownerId: consumerId, type: 'consumer' } });
+    if (!consumerAccount) return res.status(400).send({ error: "Consumer account not found." });
+
     await createLedgerEntry({
-        debitAccountId: 'consumer-'+consumerId, 
-        creditAccountId: holdingAccount.id, 
-        amount: coinAmount, 
-        refType: 'gift', 
+        debitAccountId: consumerAccount.id,
+        creditAccountId: holdingAccount.id,
+        amountUSD: +(coinAmount * COIN_TO_USD),
+        refType: 'gift',
         refId: gift.id,
     });
 
@@ -157,6 +164,8 @@ app.post('/lives/:id/end', async (req: Request, res: Response) => {
     res.send({status: 'settled', settlement, qualityMetrics});
 });
 
+
+
 /* --------------- POST REQUESTS --------------- */
 
 
@@ -164,62 +173,289 @@ app.post('/lives/:id/end', async (req: Request, res: Response) => {
 /* DEMO ENDPOINTS */
 
 // Send a single gift
+// Send a single gift
 app.post('/demo/send-gift/:liveId', async (req, res) => {
-  const liveId = req.params.liveId;
-  // Pick a random consumer
-  const consumers = await prisma.user.findMany({ where: { role: 'consumer' } });
-  const consumer = consumers[Math.floor(Math.random() * consumers.length)];
-  await prisma.gift.create({
-    data: {
-      liveId,
-      consumerId: consumer.id,
-      idempotencyKey: crypto.randomUUID(),
-      coinAmount: Math.floor(Math.random() * 500) + 50,
-      timestamp: new Date(),
-      riskFlag: false,
+    const liveId = req.params.liveId;
+    // Pick a random consumer
+    const consumers = await prisma.user.findMany({ where: { role: 'consumer' } });
+    const consumer = consumers[Math.floor(Math.random() * consumers.length)];
+    const coinAmount = Math.floor(Math.random() * 500) + 50;
+    const gift = await prisma.gift.create({
+        data: {
+        liveId,
+        consumerId: consumer.id,
+        idempotencyKey: crypto.randomUUID(),
+        coinAmount,
+        timestamp: new Date(),
+        riskFlag: false,
+        }
+    });
+
+    // Ledger entry: move USD from consumer to holding
+    const holdingAccount = await getHoldingAccountforCreatorByLive(liveId);
+    const consumerAccount = await prisma.account.findFirst({ where: { ownerId: consumer.id, type: 'consumer' } });
+    if (!consumerAccount) {
+        return res.status(400).send({ error: "Consumer account not found." });
     }
-  });
-  res.send({ ok: true });
+
+    const usdAmount = +(coinAmount * COIN_TO_USD).toFixed(2);
+
+    await createLedgerEntry({
+        debitAccountId: consumerAccount.id,
+        creditAccountId: holdingAccount.id,
+        amountUSD: usdAmount,
+        refType: 'gift',
+        refId: gift.id,
+    });
+
+    res.send({ ok: true });
 });
 
 // Send multiple gifts
 app.post('/demo/send-multiple-gifts/:liveId', async (req, res) => {
-  const liveId = req.params.liveId;
-  const consumers = await prisma.user.findMany({ where: { role: 'consumer' } });
-  for (let i = 0; i < 5; i++) {
-    const consumer = consumers[Math.floor(Math.random() * consumers.length)];
-    await prisma.gift.create({
-      data: {
-        idempotencyKey: crypto.randomUUID(),
-        liveId,
-        consumerId: consumer.id,
-        coinAmount: Math.floor(Math.random() * 500) + 50,
-        timestamp: new Date(),
-        riskFlag: false,
-      }
-    });
-  }
-  res.send({ ok: true });
+    const liveId = req.params.liveId;
+    const consumers = await prisma.user.findMany({ where: { role: 'consumer' } });
+    const holdingAccount = await getHoldingAccountforCreatorByLive(liveId);
+
+    for (let i = 0; i < 5; i++) {
+        const consumer = consumers[Math.floor(Math.random() * consumers.length)];
+        const coinAmount = Math.floor(Math.random() * 500) + 50;
+        const gift = await prisma.gift.create({
+            data: {
+            idempotencyKey: crypto.randomUUID(),
+            liveId,
+            consumerId: consumer.id,
+            coinAmount,
+            timestamp: new Date(),
+            riskFlag: false,
+            }
+        });
+
+        const consumerAccount = await prisma.account.findFirst({ where: { ownerId: consumer.id, type: 'consumer' } });
+        if (!consumerAccount) {
+            return res.status(400).send({ error: "Consumer account not found." });
+        }
+
+        const usdAmount = +(coinAmount * COIN_TO_USD).toFixed(2);
+
+        await createLedgerEntry({
+            debitAccountId: consumerAccount.id,
+            creditAccountId: holdingAccount.id,
+            amountUSD: usdAmount,
+            refType: 'gift',
+            refId: gift.id,
+        });
+    }
+
+    res.send({ ok: true });
 });
 
 // Trigger a fraud burst
 app.post('/demo/fraud-burst/:liveId', async (req, res) => {
-  const liveId = req.params.liveId;
-  const consumers = await prisma.user.findMany({ where: { role: 'consumer' } });
-  for (let i = 0; i < 12; i++) {
-    const consumer = consumers[Math.floor(Math.random() * consumers.length)];
-    await prisma.gift.create({
-      data: {
-        liveId,
-        consumerId: consumer.id,
-        idempotencyKey: crypto.randomUUID(),
-        coinAmount: Math.floor(Math.random() * 2000) + 1000, // Large amount
-        timestamp: new Date(),
-        riskFlag: true,
-      }
+    const liveId = req.params.liveId;
+    const consumers = await prisma.user.findMany({ where: { role: 'consumer' } });
+    const holdingAccount = await getHoldingAccountforCreatorByLive(liveId);
+
+    // 1. Large amount
+    {
+        const consumer = consumers[Math.floor(Math.random() * consumers.length)];
+        const coinAmount = 5000;
+        const gift = await prisma.gift.create({
+        data: {
+            liveId,
+            consumerId: consumer.id,
+            idempotencyKey: crypto.randomUUID(),
+            coinAmount,
+            timestamp: new Date(),
+            riskFlag: true,
+        }
+        });
+
+        const consumerAccount = await prisma.account.findFirst({ where: { ownerId: consumer.id, type: 'consumer' } });
+        if (!consumerAccount) {
+            return res.status(400).send({ error: "Consumer account not found." });
+        }
+
+        const usdAmount = +(coinAmount * COIN_TO_USD).toFixed(2);
+
+        await createLedgerEntry({
+            debitAccountId: consumerAccount.id,
+            creditAccountId: holdingAccount.id,
+            amountUSD: usdAmount,
+            refType: 'gift',
+            refId: gift.id,
+        });
+    }
+
+    // 2. Too many gifts recently
+    {
+        const consumer = consumers[Math.floor(Math.random() * consumers.length)];
+        // Simulate recent gifts by creating 11 gifts in the last hour
+        for (let i = 0; i < 4; i++) {
+            await prisma.gift.create({
+                data: {
+                liveId,
+                consumerId: consumer.id,
+                idempotencyKey: crypto.randomUUID(),
+                coinAmount: 10,
+                timestamp: new Date(Date.now() - 10 * 60 * 1000), // 10 minutes ago
+                riskFlag: true,
+                }
+            });
+        }
+        
+        const coinAmount = 100;
+        const gift = await prisma.gift.create({
+        data: {
+            liveId,
+            consumerId: consumer.id,
+            idempotencyKey: crypto.randomUUID(),
+            coinAmount,
+            timestamp: new Date(),
+            riskFlag: true,
+        }
+        });
+
+        const consumerAccount = await prisma.account.findFirst({ where: { ownerId: consumer.id, type: 'consumer' } });
+        if (!consumerAccount) {
+            return res.status(400).send({ error: "Consumer account not found." });
+        }
+
+        const usdAmount = +(coinAmount * COIN_TO_USD).toFixed(2);
+
+        await createLedgerEntry({
+            debitAccountId: consumerAccount.id,
+            creditAccountId: holdingAccount.id,
+            amountUSD: usdAmount,
+            refType: 'gift',
+            refId: gift.id,
+        });
+    }
+
+    // 3. Unverified user
+    {
+        const unverifiedConsumer = consumers.find(c => c.kycStatus !== 'verified') || consumers[0];
+        const coinAmount = 100;
+        const gift = await prisma.gift.create({
+            data: {
+                liveId,
+                consumerId: unverifiedConsumer.id,
+                idempotencyKey: crypto.randomUUID(),
+                coinAmount,
+                timestamp: new Date(),
+                riskFlag: true,
+            }
+        });
+
+        const consumerAccount = await prisma.account.findFirst({ where: { ownerId: unverifiedConsumer.id, type: 'consumer' } });
+        if (!consumerAccount) {
+           return res.status(400).send({ error: "Consumer account not found." });
+        }
+
+        const usdAmount = +(coinAmount * COIN_TO_USD).toFixed(2);
+
+        await createLedgerEntry({
+            debitAccountId: consumerAccount.id,
+            creditAccountId: holdingAccount.id,
+            amountUSD: usdAmount,
+            refType: 'gift',
+            refId: gift.id,
+        });
+    }
+
+    // 4. Very new user
+    {
+        // Simulate a new user
+        const newConsumer = await prisma.user.create({
+        data: { name: 'New Fraud Fan', role: 'consumer', kycStatus: 'verified', createdAt: new Date() }
+        });
+        await prisma.account.create({ data: { ownerId: newConsumer.id, type: 'consumer', balanceUSD: 5000 } });
+        const coinAmount = 100;
+        const gift = await prisma.gift.create({
+            data: {
+                liveId,
+                consumerId: newConsumer.id,
+                idempotencyKey: crypto.randomUUID(),
+                coinAmount,
+                timestamp: new Date(),
+                riskFlag: true,
+            }
+        });
+
+        const consumerAccount = await prisma.account.findFirst({ where: { ownerId: newConsumer.id, type: 'consumer' } });
+        if (!consumerAccount) {
+            return res.status(400).send({ error: "Consumer account not found." });
+        }
+
+        const usdAmount = +(coinAmount * COIN_TO_USD).toFixed(2);
+
+        await createLedgerEntry({
+            debitAccountId: consumerAccount.id,
+            creditAccountId: holdingAccount.id,
+            amountUSD: usdAmount,
+            refType: 'gift',
+            refId: gift.id,
+        });
+    }
+
+    res.send({ ok: true });
+});
+
+app.post('/lives/:id/fast-forward', async (req: Request, res: Response) => {
+  const liveId = req.params.id;
+  try {
+    const live = await prisma.live.findUnique({ where: { id: liveId } });
+    if (!live || live.status !== 'ended') {
+      return res.status(400).send({ error: "Live must be ended before payout." });
+    }
+
+    const qualityMetrics = await computeQualityScore(liveId);
+    const settlement = await runSettlementForLive(liveId, qualityMetrics.score);
+
+    const holding = await getHoldingAccountforCreatorByLive(liveId);
+    const creatorAccount = await prisma.account.findFirst({
+      where: { ownerId: live.creatorId, type: 'creator' }
     });
+    const platformAccount = await prisma.account.findFirst({
+      where: { type: 'platform' }
+    });
+    const reserveAccount = await prisma.account.findFirst({
+      where: { type: 'reserve' }
+    });
+
+    // Move funds from holding to creator, platform, and reserve accounts
+    await createLedgerEntry({
+      debitAccountId: holding.id,
+      creditAccountId: creatorAccount!.id,
+      amountUSD: settlement.creatorAmountUSD,
+      refType: 'fast-forward',
+      refId: liveId,
+    });
+
+    await createLedgerEntry({
+      debitAccountId: holding.id,
+      creditAccountId: platformAccount!.id,
+      amountUSD: settlement.platformAmountUSD,
+      refType: 'fast-forward',
+      refId: liveId,
+    });
+
+    await createLedgerEntry({
+      debitAccountId: holding.id,
+      creditAccountId: reserveAccount!.id,
+      amountUSD: settlement.reserveAmountUSD,
+      refType: 'fast-forward',
+      refId: liveId,
+    });
+
+    // Optionally, create a new Merkle snapshot after payout
+    await createMerkleSnapshot();
+
+    res.json({ ok: true, credited: settlement.creatorAmountUSD });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Failed to fast forward payout." });
   }
-  res.send({ ok: true });
 });
 
 /* --------------- DEMO ENDPOINTS --------------- */
@@ -262,11 +498,27 @@ app.get('/lives/:id', async (req: Request, res: Response) => {
         // Compute quality metrics
         const qualityMetrics = await computeQualityScore(live.id);
 
+        // Flag for fraud
+        const giftsWithRecentCount = await Promise.all(
+            live.gifts.map(async gift => {
+                const recentGiftCount = await prisma.gift.count({
+                    where: {
+                        consumerId: gift.consumerId,
+                        timestamp: {
+                            gte: new Date(gift.timestamp.getTime() - 60 * 60 * 1000),
+                            lte: new Date(gift.timestamp),
+                        },
+                    },
+                });
+                return { ...gift, recentGiftCount };
+            })
+        );
+
         res.json({
             creatorName: live.creator?.name,
             status: live.status,
             startAt: live.startAt,
-            gifts: live.gifts,
+            gifts: giftsWithRecentCount,
             fraudStats,
             qualityMetrics,
         });
@@ -297,7 +549,7 @@ app.get('/lives/:id/settlement', async (req: Request, res: Response) => {
 app.get('/creators/:id/balance', async (req: Request, res: Response) => {
     const creatorId = req.params.id;
     const account = await prisma.account.findFirst({where: {ownerId: creatorId, type: 'creator'}});
-    res.send({balance: account?.balance ?? 0});
+    res.send({balanceUSD: account?.balanceUSD ?? 0});
 });
 
 // Provide Merkle proof for a given ledger entry
@@ -432,13 +684,13 @@ async function getHoldingAccountforCreatorByLive(liveId: string) {
 async function createLedgerEntry({
     debitAccountId, 
     creditAccountId, 
-    amount, 
+    amountUSD, 
     refType, 
     refId
 } : {
     debitAccountId: string, 
     creditAccountId: string, 
-    amount: number, 
+    amountUSD: number, 
     refType: string, 
     refId: string
 }) {
@@ -451,14 +703,14 @@ async function createLedgerEntry({
         const prevHash = prev?.hashThis ?? '';
 
         // Update previous hash
-        const payload = `${debitAccountId}|${creditAccountId}|${amount}|${refType}|${refId}|${Date.now()}`;
+        const payload = `${debitAccountId}|${creditAccountId}|${amountUSD}|${refType}|${refId}|${Date.now()}`;
         const hash = crypto.createHash('sha256').update(prevHash + payload).digest('hex');
 
         await transaction.ledger.create({
             data: {
                 debitAccountId, 
                 creditAccountId, 
-                amount, 
+                amount: amountUSD, 
                 refType, 
                 refId, 
                 hashPrev: 
@@ -474,12 +726,12 @@ async function createLedgerEntry({
 
         if (debit) await transaction.account.update({
             where: {id: debit.id}, 
-            data: {balance: debit.balance - amount}
+            data: {balanceUSD: +(debit.balanceUSD - amountUSD).toFixed(2)}
         });
 
         if (credit) await transaction.account.update({
             where: {id: credit.id}, 
-            data: {balance: credit.balance + amount}
+            data: {balanceUSD: +(credit.balanceUSD + amountUSD).toFixed(2)}
         });
     });
 }
@@ -518,54 +770,11 @@ async function runSettlementForLive(liveId: string, quality: number) {
     const platformAmountCoins = Math.floor(totalCoins * shares.platformShare);
     const reserveAmountCoins = totalCoins - creatorAmountCoins - platformAmountCoins;
 
-    // Example conversion rate
-    const COIN_TO_USD = 0.013;
-
     // Convert to USD
     const totalUSD = (totalCoins * COIN_TO_USD).toFixed(2);
     const creatorAmountUSD = +((creatorAmountCoins * COIN_TO_USD).toFixed(2));
     const platformAmountUSD = +((platformAmountCoins * COIN_TO_USD).toFixed(2));
     const reserveAmountUSD = +((reserveAmountCoins * COIN_TO_USD).toFixed(2));
-
-    // Ledger: Move from holding account to creator, platform, and reserve accounts
-    const holding = await getHoldingAccountforCreatorByLive(liveId);
-    const live = await prisma.live.findUnique({where: {id: liveId}});
-
-    const creatorAccount = await prisma.account.findFirst({
-        where: {ownerId: live!.creatorId, type: 'creator'}
-    });
-
-    const platformAccount = await prisma.account.findFirst({
-        where: {type: 'platform'}
-    });
-
-    const reserveAccount = await prisma.account.findFirst({
-        where: {type: 'reserve'}
-    });
-
-    await createLedgerEntry({
-        debitAccountId: holding.id, 
-        creditAccountId: creatorAccount!.id, 
-        amount: creatorAmountUSD, 
-        refType: 'settlement', 
-        refId: liveId,
-    });
-    
-    await createLedgerEntry({
-        debitAccountId: holding.id, 
-        creditAccountId: platformAccount!.id, 
-        amount: platformAmountUSD, 
-        refType: 'settlement', 
-        refId: liveId,
-    });
-
-    await createLedgerEntry({
-        debitAccountId: holding.id, 
-        creditAccountId: reserveAccount!.id, 
-        amount: reserveAmountUSD, 
-        refType: 'settlement', 
-        refId: liveId
-    });
 
     return {
         totalCoins,

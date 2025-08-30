@@ -50,11 +50,11 @@ model Gift {
 }
 
 model Account {
-  id      String @id @default(cuid())
-  ownerId String?
-  owner   User?   @relation(fields: [ownerId], references: [id])
-  type    String // 'holding' | 'creator' | 'platform' | 'reserve'
-  balance Int    @default(0)
+  id         String @id @default(cuid())
+  ownerId    String?
+  owner      User?   @relation(fields: [ownerId], references: [id])
+  type       String // 'holding' | 'creator' | 'platform' | 'reserve'
+  balanceUSD Float   @default(0.0)
 }
 
 model Ledger {
