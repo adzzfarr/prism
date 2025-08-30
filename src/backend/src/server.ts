@@ -164,6 +164,15 @@ app.post('/lives/:id/end', async (req: Request, res: Response) => {
     res.send({status: 'settled', settlement, qualityMetrics});
 });
 
+app.post('/ledgers/by-ids', async (req: Request, res: Response) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids)) return res.status(400).send({ error: "ids must be an array" });
+  const ledgers = await prisma.ledger.findMany({
+    where: { id: { in: ids } },
+    orderBy: { createdAt: 'asc' }
+  });
+  res.json({ ledgers });
+});
 
 
 /* --------------- POST REQUESTS --------------- */
@@ -623,6 +632,14 @@ app.get('/merkle/proof/:ledgerId', async (req: Request, res: Response) => {
         rootSignature: snapshot.signature,
         proof: proofHashes,
     });
+});
+
+// Get latest Merkle snapshot
+app.get('/merkle/snapshot', async (req: Request, res: Response) => {
+  const snapshot = await prisma.merkleSnapshot.findFirst({
+    orderBy: { createdAt: 'desc' }
+  });
+  res.json({ snapshot });
 });
 
 /* --------------- GET REQUESTS --------------- */
