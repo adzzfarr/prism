@@ -170,9 +170,8 @@ app.post('/lives/:id/end', async (req: Request, res: Response) => {
 
 
 
-/* DEMO ENDPOINTS */
+/* DEMO-SPECIFIC ENDPOINTS */
 
-// Send a single gift
 // Send a single gift
 app.post('/demo/send-gift/:liveId', async (req, res) => {
     const liveId = req.params.liveId;
@@ -458,7 +457,7 @@ app.post('/lives/:id/fast-forward', async (req: Request, res: Response) => {
   }
 });
 
-/* --------------- DEMO ENDPOINTS --------------- */
+/* --------------- DEMO-SPEC ENDPOINTS --------------- */
 
 
 
@@ -627,6 +626,8 @@ app.get('/merkle/proof/:ledgerId', async (req: Request, res: Response) => {
 });
 
 /* --------------- GET REQUESTS --------------- */
+
+
 
 // LISTEN
 app.listen(4000, () => console.log('Listening on 4000'));
