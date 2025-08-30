@@ -1,6 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import express from 'express';
-import { Request, Response } from 'express';
+import e, { Request, Response } from 'express';
 import bodyParser from 'body-parser';
 import crypto from 'crypto';
 import process from "process";
@@ -263,16 +263,34 @@ app.get('/lives/:id', async (req: Request, res: Response) => {
         const qualityMetrics = await computeQualityScore(live.id);
 
         res.json({
-        creatorName: live.creator?.name,
-        status: live.status,
-        startAt: live.startAt,
-        gifts: live.gifts,
-        fraudStats,
-        qualityMetrics,
+            creatorName: live.creator?.name,
+            status: live.status,
+            startAt: live.startAt,
+            gifts: live.gifts,
+            fraudStats,
+            qualityMetrics,
         });
     } catch (error) {
         res.status(500).send({ error: "Failed to fetch session." });
     }
+});
+
+// Get settlement
+app.get('/lives/:id/settlement', async (req: Request, res: Response) => {
+  const liveId = req.params.id;
+  try {
+    const live = await prisma.live.findUnique({ where: { id: liveId } });
+    if (!live || live.status !== 'ended') {
+      return res.status(404).send({ error: "Live not ended or not found" });
+    }
+
+    const qualityMetrics = await computeQualityScore(liveId);
+    const settlement = await runSettlementForLive(liveId, qualityMetrics.score);
+
+    res.json({ settlement, qualityMetrics });
+  } catch (error) {
+    res.status(500).send({ error: "Failed to fetch settlement." });
+  }
 });
 
 // Get creator balance
@@ -388,7 +406,8 @@ function computeFraudStatistics(gifts: any[]) {
     totalGifts: total,
     fraudCount,
     fraudUsers,
-    fraudPercent: total > 0 ? Math.round((fraudCount / total) * 100) : 0
+    fraudPercent: total > 0 ? Math.round((fraudCount / total) * 100) : 0,
+    legitPercent: total > 0 ? Math.round(((total - fraudCount) / total) * 100) : 0,
   };
 }
 
@@ -471,6 +490,10 @@ async function computeQualityScore(liveId: string) {
     const legitimateGifts = gifts.filter(g => !g.riskFlag);
     const giftCount = legitimateGifts.length;
 
+    if (gifts.length === 0) {
+        return { score: 0, retention: 0, engagement: 0 };
+    }
+
     // Fake values for retention and engagement; could be calculated using
     // average watch time / live duration, number of comments per minute, etc.
     // Weights can be adjusted after real world testing
@@ -486,21 +509,23 @@ async function computeQualityScore(liveId: string) {
 async function runSettlementForLive(liveId: string, quality: number) {
     // Convert gifts to coins
     const gifts = await prisma.gift.findMany({where: {liveId}});
-    const total = gifts.reduce((prev, gift) => prev + gift.coinAmount, 0);
+    const totalCoins = gifts.reduce((prev, gift) => prev + gift.coinAmount, 0);
 
-    // Base proportions of shares
-    const baseCreatorShare = 0.65;
-    const basePlatformShare = 0.3;
-    // reserveShare = 0.05; can be adjusted
+    const shares = getScaledShares(quality);
 
     // Adjust creator and platform shares based on quality; formula can be adjusted as necessary
-    const qualityBonus = Math.min(0.15, Math.max(0, (quality - 40) / 200));
-    const creatorShare = baseCreatorShare + qualityBonus;
-    const platformShare = basePlatformShare - qualityBonus;
+    const creatorAmountCoins = Math.floor(totalCoins * shares.creatorShare);
+    const platformAmountCoins = Math.floor(totalCoins * shares.platformShare);
+    const reserveAmountCoins = totalCoins - creatorAmountCoins - platformAmountCoins;
 
-    const creatorAmount = Math.floor(total * creatorShare);
-    const platformAmount = Math.floor(total * platformShare);
-    const reserveAmount = total - creatorAmount - platformAmount;
+    // Example conversion rate
+    const COIN_TO_USD = 0.013;
+
+    // Convert to USD
+    const totalUSD = (totalCoins * COIN_TO_USD).toFixed(2);
+    const creatorAmountUSD = +((creatorAmountCoins * COIN_TO_USD).toFixed(2));
+    const platformAmountUSD = +((platformAmountCoins * COIN_TO_USD).toFixed(2));
+    const reserveAmountUSD = +((reserveAmountCoins * COIN_TO_USD).toFixed(2));
 
     // Ledger: Move from holding account to creator, platform, and reserve accounts
     const holding = await getHoldingAccountforCreatorByLive(liveId);
@@ -521,7 +546,7 @@ async function runSettlementForLive(liveId: string, quality: number) {
     await createLedgerEntry({
         debitAccountId: holding.id, 
         creditAccountId: creatorAccount!.id, 
-        amount: creatorAmount, 
+        amount: creatorAmountUSD, 
         refType: 'settlement', 
         refId: liveId,
     });
@@ -529,7 +554,7 @@ async function runSettlementForLive(liveId: string, quality: number) {
     await createLedgerEntry({
         debitAccountId: holding.id, 
         creditAccountId: platformAccount!.id, 
-        amount: platformAmount, 
+        amount: platformAmountUSD, 
         refType: 'settlement', 
         refId: liveId,
     });
@@ -537,17 +562,56 @@ async function runSettlementForLive(liveId: string, quality: number) {
     await createLedgerEntry({
         debitAccountId: holding.id, 
         creditAccountId: reserveAccount!.id, 
-        amount: reserveAmount, 
+        amount: reserveAmountUSD, 
         refType: 'settlement', 
         refId: liveId
     });
 
     return {
-        total, 
-        creatorAmount, 
-        platformAmount, 
-        reserveAmount,
+        totalCoins,
+        totalUSD,
+        creatorAmountCoins,
+        creatorAmountUSD,
+        platformAmountCoins,
+        platformAmountUSD,
+        reserveAmountCoins,
+        reserveAmountUSD,
     };
+}
+
+function getScaledShares(qualityScore: number) : {creatorShare: number, platformShare: number} {
+    /* 
+        Base: Creator 65% / Platform 30% / Safety 5% (Fixed).
+        Tiers of Creator Share by QualityScore (0–100):
+        - 0–39 → 65%
+        - 40–69 → 70%
+        - 70–84 → 75%
+        - 85–100 → 80%
+
+        Reserve share fixed; no need to return.
+        Reserve release after T+24h (demo: button to fast-forward).
+    */
+    if (qualityScore < 40) {
+        return {
+            creatorShare: 0.65,
+            platformShare: 0.30,
+        }
+    } else if (40 <= qualityScore && qualityScore < 70) {
+        return {
+            creatorShare: 0.70,
+            platformShare: 0.25,
+        }
+    } else if (70 <= qualityScore && qualityScore < 85) {
+        return {
+            creatorShare: 0.75,
+            platformShare: 0.20,
+        }
+    } else {
+        return {
+            creatorShare: 0.80,
+            platformShare: 0.15,
+        }
+    }
 }
 
 async function createMerkleSnapshot() {

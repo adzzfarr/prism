@@ -1,4 +1,5 @@
-// How to run: pnpm ts-node demo/demo-data.ts
+// How to run: 
+// pnpm tsx demo/demo-data.ts
 
 import { PrismaClient } from '@prisma/client';
 
@@ -15,7 +16,7 @@ async function main() {
 
   // Create users
   const creator = await prisma.user.create({
-    data: { name: 'Alice Creator', role: 'creator', kycStatus: 'verified' }
+    data: { name: 'Alice Creator', id: 'demo-creator', role: 'creator', kycStatus: 'verified' }
   });
   const consumer1 = await prisma.user.create({
     data: { name: 'Bob Fan', role: 'consumer', kycStatus: 'verified' }
