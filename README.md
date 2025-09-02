@@ -74,7 +74,7 @@ TikTok enables creators to earn revenue from content, but designing a fair, tran
 
 ## Demo
 
-- **Demo Video:** 
+- **Demo Video:** [YouTube]https://youtu.be/WiOKJdDvhHA
 
 ---
 
